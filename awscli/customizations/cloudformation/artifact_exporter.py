@@ -213,6 +213,55 @@ def copy_to_temp_dir(filepath):
     return tmp_dir
 
 
+def format_key(s3_url, uploader):
+    bucket, key = s3_url[len('s3://'):].split('/',1)
+    return key
+
+
+def format_s3_url(s3_url, uploader):
+    return s3_url
+
+
+def format_https_url(s3_url, uploader):
+    return uploader.to_path_style_s3_url(format_key(s3_url, uploader))
+
+
+S3_FORMATTERS_DICT = {
+    's3_url': format_s3_url,
+    'https_url': format_https_url,
+    'key': format_key
+}
+
+
+def package_s3_bucket(properties, uploader):
+    return uploader.bucket_name
+
+
+def package_dir(properties, uploader):
+    s3_url = zip_and_upload(properties['Path'], uploader)
+    formatter = S3_FORMATTERS_DICT[properties['Format']]
+    return formatter(s3_url, uploader)
+
+
+def package_file(properties, uploader):
+    s3_url = uploader.upload_with_dedup(properties['Path'])
+    formatter = S3_FORMATTERS_DICT[properties['Format']]
+    return formatter(s3_url, uploader)
+
+
+PACKAGERS_DICT = {
+    'S3Bucket': package_s3_bucket,
+    'File': package_file,
+    'Zipfile': package_dir
+}
+
+
+def set_parameter_defaults(template_parameters, package_parameters):
+    for key, parameter in template_parameters.items():
+        if key in package_parameters:
+          parameter['Default'] = package_parameters[key]
+
+
 class Resource(object):
     """
     Base class representing a CloudFormation resource that can be exported
@@ -435,6 +484,24 @@ class Template(object):
         :return: The template with references to artifacts that have been
         exported to s3.
         """
+        metadata = self.template_dict.get('Metadata', {})
+        if 'AWS::CloudFormation::Package' in metadata:
+            package_metadata = metadata['AWS::CloudFormation::Package']
+            package_parameters = {}
+
+            for key, parameter in package_metadata.get('Parameters', {}).items():
+                package_type = parameter['Type']
+                packager = PACKAGERS_DICT.get(package_type)
+                if packager:
+                    properties = parameter.get('Properties', {})
+                    package_parameters[key] = packager(properties, self.uploader)
+                else:
+                    msg = "unsupported package type: '{}'".format(package_type)
+                    raise RuntimeError(msg)
+
+            template_parameters = self.template_dict.get('Parameters', {})
+            set_parameter_defaults(template_parameters, package_parameters)
+
         if "Resources" not in self.template_dict:
             return self.template_dict
 
